@@ -22,10 +22,11 @@ Very quick OpenMAX IL explanation:
   example uses two non-blocking functions: OMX_SendCommand and
   OMX_FillThisBuffer.
 
-Note: The camera component has two video ports: "preview" and "video". The
-"preview" port must be enabled even if you're not using it (tunnel it to the
-null_sink component) because it is used to run AGC (automatic gain control) and
-AWB (auto white balance) algorithms.
+Note: The camera component has two video ports: "preview" and
+"video". The "preview" port is tunneled to the video_render
+component. Even if the preview would not be used it must be enabled
+because it is used to run AGC (automatic gain control) and AWB (auto
+white balance) algorithms.
 */
 
 #include <stdarg.h>
@@ -94,6 +95,8 @@ AWB (auto white balance) algorithms.
 #define CAM_ROI_WIDTH 100 //0 .. 100
 #define CAM_ROI_HEIGHT 100 //0 .. 100
 #define CAM_DRC OMX_DynRangeExpOff
+
+#define HS_RECORD
 
 /*
 Possible values:
@@ -229,6 +232,12 @@ void enable_encoder_output_port (
     OMX_BUFFERHEADERTYPE** encoder_output_buffer);
 void disable_encoder_output_port (
     component_t* encoder,
+    OMX_BUFFERHEADERTYPE* encoder_output_buffer);
+void enable_camera_output_port (
+    component_t* camera,
+    OMX_BUFFERHEADERTYPE** camera_output_buffer);
+void disable_camera_output_port (
+    component_t* camera,
     OMX_BUFFERHEADERTYPE* encoder_output_buffer);
 void set_camera_settings (component_t* camera);
 void set_h264_settings (component_t* encoder);
@@ -542,6 +551,80 @@ void disable_encoder_output_port (
   }
   
   wait (encoder, EVENT_PORT_DISABLE, 0);
+}
+
+void enable_camera_output_port (
+    component_t* camera,
+    OMX_BUFFERHEADERTYPE** camera_output_buffer){
+  //The port is not enabled until the buffer is allocated
+  OMX_ERRORTYPE error;
+  
+  enable_port (camera, 70);
+  
+  OMX_PARAM_PORTDEFINITIONTYPE port_st;
+  OMX_INIT_STRUCTURE (port_st);
+  port_st.nPortIndex = 70;
+  if ((error = OMX_GetParameter (camera->handle, OMX_IndexParamPortDefinition,
+      &port_st))){
+    fprintf (stderr, "error: OMX_GetParameter: %s\n",
+        dump_OMX_ERRORTYPE (error));
+    exit (1);
+  }
+  printf ("allocating %s output buffer\n", camera->name);
+  if ((error = OMX_AllocateBuffer (camera->handle, camera_output_buffer, 70,
+      0, port_st.nBufferSize))){
+    fprintf (stderr, "error: OMX_AllocateBuffer: %s\n",
+        dump_OMX_ERRORTYPE (error));
+    exit (1);
+  }
+  
+  wait (camera, EVENT_PORT_ENABLE, 0);
+}
+
+void enable_render_input_port (
+    component_t* camera,
+    OMX_BUFFERHEADERTYPE** camera_output_buffer){
+  //The port is not enabled until the buffer is allocated
+  OMX_ERRORTYPE error;
+  
+  enable_port (camera, 90);
+  
+  OMX_PARAM_PORTDEFINITIONTYPE port_st;
+  OMX_INIT_STRUCTURE (port_st);
+  port_st.nPortIndex = 90;
+  if ((error = OMX_GetParameter (camera->handle, OMX_IndexParamPortDefinition,
+      &port_st))){
+    fprintf (stderr, "error: OMX_GetParameter: %s\n",
+        dump_OMX_ERRORTYPE (error));
+    exit (1);
+  }
+  /* printf ("allocating %s output buffer\n", camera->name); */
+  /* if ((error = OMX_AllocateBuffer (camera->handle, camera_output_buffer, 90, */
+  /*     0, port_st.nBufferSize))){ */
+  /*   fprintf (stderr, "error: OMX_AllocateBuffer: %s\n", */
+  /*       dump_OMX_ERRORTYPE (error)); */
+  /*   exit (1); */
+  /* } */
+  
+  wait (camera, EVENT_PORT_ENABLE, 0);
+}
+
+void disable_camera_output_port (
+    component_t* camera,
+    OMX_BUFFERHEADERTYPE* camera_output_buffer){
+  //The port is not disabled until the buffer is released
+  OMX_ERRORTYPE error;
+  
+  disable_port (camera, 70);
+  
+  //Free camera output buffer
+  printf ("releasing %s output buffer\n", camera->name);
+  if ((error = OMX_FreeBuffer (camera->handle, 70, camera_output_buffer))){
+    fprintf (stderr, "error: OMX_FreeBuffer: %s\n", dump_OMX_ERRORTYPE (error));
+    exit (1);
+  }
+  
+  wait (camera, EVENT_PORT_DISABLE, 0);
 }
 
 void set_camera_settings (component_t* camera){
@@ -877,10 +960,10 @@ int main (){
   OMX_BUFFERHEADERTYPE* encoder_output_buffer;
   component_t camera;
   component_t encoder;
-  component_t null_sink;
+  component_t render;
   camera.name = "OMX.broadcom.camera";
   encoder.name = "OMX.broadcom.video_encode";
-  null_sink.name = "OMX.broadcom.null_sink";
+  render.name = "OMX.broadcom.video_render";
   
   //Open the file
   int fd = open (FILENAME, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0666);
@@ -901,7 +984,7 @@ int main (){
   //Initialize components
   init_component (&camera);
   init_component (&encoder);
-  init_component (&null_sink);
+  init_component (&render);
   
   //Initialize camera drivers
   load_camera_drivers (&camera);
@@ -986,17 +1069,43 @@ int main (){
     exit (1);
   }
   
+  //Configure render port definition
+  printf ("configuring %s port definition\n", render.name);
+  OMX_INIT_STRUCTURE (port_st);
+  // HS: not sure this is required, the encode only configures the
+  // output port
+  port_st.nPortIndex = 90;
+  if ((error = OMX_GetParameter (render.handle, OMX_IndexParamPortDefinition,
+      &port_st))){
+    fprintf (stderr, "error: OMX_GetParameter: %s\n",
+        dump_OMX_ERRORTYPE (error));
+    exit (1);
+  }
+  //port_st.format.video.nFrameWidth = CAM_WIDTH;
+  //port_st.format.video.nFrameHeight = CAM_HEIGHT;
+  //port_st.format.video.nStride = CAM_WIDTH;
+  //port_st.format.video.xFramerate = VIDEO_FRAMERATE << 16;
+  //Despite being configured later, these two fields need to be set
+  //  port_st.format.video.nBitrate = VIDEO_QP ? 0 : VIDEO_BITRATE;
+  //port_st.format.video.eCompressionFormat = OMX_VIDEO_CodingAVC;
+  if ((error = OMX_SetParameter (render.handle, OMX_IndexParamPortDefinition,
+      &port_st))){
+    fprintf (stderr, "error: OMX_SetParameter: %s\n",
+        dump_OMX_ERRORTYPE (error));
+    exit (1);
+  }
+  
   //Configure H264
   set_h264_settings (&encoder);
   
-  //Setup tunnels: camera (video) -> video_encode, camera (preview) -> null_sink
+  //Setup tunnels: camera (video) -> video_encode, camera (preview) -> video_render
   printf ("configuring tunnels\n");
   if ((error = OMX_SetupTunnel (camera.handle, 71, encoder.handle, 200))){
     fprintf (stderr, "error: OMX_SetupTunnel: %s\n",
         dump_OMX_ERRORTYPE (error));
     exit (1);
   }
-  if ((error = OMX_SetupTunnel (camera.handle, 70, null_sink.handle, 240))){
+  if ((error = OMX_SetupTunnel (camera.handle, 70, render.handle, 90))){
     fprintf (stderr, "error: OMX_SetupTunnel: %s\n",
         dump_OMX_ERRORTYPE (error));
     exit (1);
@@ -1007,16 +1116,18 @@ int main (){
   wait (&camera, EVENT_STATE_SET, 0);
   change_state (&encoder, OMX_StateIdle);
   wait (&encoder, EVENT_STATE_SET, 0);
-  change_state (&null_sink, OMX_StateIdle);
-  wait (&null_sink, EVENT_STATE_SET, 0);
+  change_state (&render, OMX_StateIdle);
+  wait (&render, EVENT_STATE_SET, 0);
   
   //Enable the ports
+#ifdef HS_RECORD
   enable_port (&camera, 71);
   wait (&camera, EVENT_PORT_ENABLE, 0);
+#endif
   enable_port (&camera, 70);
   wait (&camera, EVENT_PORT_ENABLE, 0);
-  enable_port (&null_sink, 240);
-  wait (&null_sink, EVENT_PORT_ENABLE, 0);
+  enable_port (&render, 90);
+  wait (&render, EVENT_PORT_ENABLE, 0);
   enable_port (&encoder, 200);
   wait (&encoder, EVENT_PORT_ENABLE, 0);
   enable_encoder_output_port (&encoder, &encoder_output_buffer);
@@ -1027,8 +1138,8 @@ int main (){
   change_state (&encoder, OMX_StateExecuting);
   wait (&encoder, EVENT_STATE_SET, 0);
   wait (&encoder, EVENT_PORT_SETTINGS_CHANGED, 0);
-  change_state (&null_sink, OMX_StateExecuting);
-  wait (&null_sink, EVENT_STATE_SET, 0);
+  change_state (&render, OMX_StateExecuting);
+  wait (&render, EVENT_STATE_SET, 0);
   
   //Enable camera capture port. This basically says that the port 71 will be
   //used to get data from the camera. If you're capturing a still, the port 72
@@ -1049,7 +1160,7 @@ int main (){
   clock_gettime (CLOCK_MONOTONIC, &spec);
   long now = spec.tv_sec*1000 + spec.tv_nsec/1.0e6;
   long end = now + 3000;
-  
+
   while (1){
     //Get the buffer data
     if ((error = OMX_FillThisBuffer (encoder.handle, encoder_output_buffer))){
@@ -1089,16 +1200,18 @@ int main (){
   wait (&camera, EVENT_STATE_SET, 0);
   change_state (&encoder, OMX_StateIdle);
   wait (&encoder, EVENT_STATE_SET, 0);
-  change_state (&null_sink, OMX_StateIdle);
-  wait (&null_sink, EVENT_STATE_SET, 0);
+  change_state (&render, OMX_StateIdle);
+  wait (&render, EVENT_STATE_SET, 0);
   
   //Disable the tunnel ports
+#ifdef HS_RECORD
   disable_port (&camera, 71);
   wait (&camera, EVENT_PORT_DISABLE, 0);
+#endif
   disable_port (&camera, 70);
   wait (&camera, EVENT_PORT_DISABLE, 0);
-  disable_port (&null_sink, 240);
-  wait (&null_sink, EVENT_PORT_DISABLE, 0);
+  disable_port (&render, 90);
+  wait (&render, EVENT_PORT_DISABLE, 0);
   disable_port (&encoder, 200);
   wait (&encoder, EVENT_PORT_DISABLE, 0);
   disable_encoder_output_port (&encoder, encoder_output_buffer);
@@ -1108,13 +1221,13 @@ int main (){
   wait (&camera, EVENT_STATE_SET, 0);
   change_state (&encoder, OMX_StateLoaded);
   wait (&encoder, EVENT_STATE_SET, 0);
-  change_state (&null_sink, OMX_StateLoaded);
-  wait (&null_sink, EVENT_STATE_SET, 0);
+  change_state (&render, OMX_StateLoaded);
+  wait (&render, EVENT_STATE_SET, 0);
   
   //Deinitialize components
   deinit_component (&camera);
   deinit_component (&encoder);
-  deinit_component (&null_sink);
+  deinit_component (&render);
   
   //Deinitialize OpenMAX IL
   if ((error = OMX_Deinit ())){
