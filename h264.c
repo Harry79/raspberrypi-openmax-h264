@@ -40,6 +40,7 @@ white balance) algorithms.
 #include <IL/OMX_Broadcom.h>
 
 #include "dump.h"
+#include <stdbool.h>
 
 #define OMX_INIT_STRUCTURE(x) \
   memset (&(x), 0, sizeof (x)); \
@@ -97,6 +98,7 @@ white balance) algorithms.
 #define CAM_DRC OMX_DynRangeExpOff
 
 #define HS_RECORD
+#define HS_INTERCEPT
 
 /*
 Possible values:
@@ -281,6 +283,10 @@ OMX_ERRORTYPE event_handler (
               component->name, data2);
           wake (component, EVENT_MARK_BUFFER);
           break;
+      default:
+	//This should never execute, just ignore
+	printf ("event: OMX_EventCmdComplete unknown (%X)\n", data1);
+	break;
       }
       break;
     case OMX_EventError:
@@ -337,6 +343,19 @@ OMX_ERRORTYPE fill_buffer_done (
   return OMX_ErrorNone;
 }
 
+//Function that is called when a component fills a buffer with data
+OMX_ERRORTYPE empty_buffer_done (
+    OMX_IN OMX_HANDLETYPE comp,
+    OMX_IN OMX_PTR app_data,
+    OMX_IN OMX_BUFFERHEADERTYPE* buffer){
+  component_t* component = (component_t*)app_data;
+  
+  printf ("event: %s, empty_buffer_done\n", component->name);
+  wake (component, EVENT_EMPTY_BUFFER_DONE);
+  
+  return OMX_ErrorNone;
+}
+
 void wake (component_t* component, VCOS_UNSIGNED event){
   vcos_event_flags_set (&component->flags, event, VCOS_OR);
 }
@@ -374,6 +393,7 @@ void init_component (component_t* component){
   OMX_CALLBACKTYPE callbacks_st;
   callbacks_st.EventHandler = event_handler;
   callbacks_st.FillBufferDone = fill_buffer_done;
+  callbacks_st.EmptyBufferDone = empty_buffer_done;
   
   //Get the handle
   if ((error = OMX_GetHandle (&component->handle, component->name, component,
@@ -513,8 +533,6 @@ void enable_encoder_output_port (
   //The port is not enabled until the buffer is allocated
   OMX_ERRORTYPE error;
   
-  enable_port (encoder, 201);
-  
   OMX_PARAM_PORTDEFINITIONTYPE port_st;
   OMX_INIT_STRUCTURE (port_st);
   port_st.nPortIndex = 201;
@@ -531,8 +549,6 @@ void enable_encoder_output_port (
         dump_OMX_ERRORTYPE (error));
     exit (1);
   }
-  
-  wait (encoder, EVENT_PORT_ENABLE, 0);
 }
 
 void disable_encoder_output_port (
@@ -541,16 +557,12 @@ void disable_encoder_output_port (
   //The port is not disabled until the buffer is released
   OMX_ERRORTYPE error;
   
-  disable_port (encoder, 201);
-  
   //Free encoder output buffer
   printf ("releasing %s output buffer\n", encoder->name);
   if ((error = OMX_FreeBuffer (encoder->handle, 201, encoder_output_buffer))){
     fprintf (stderr, "error: OMX_FreeBuffer: %s\n", dump_OMX_ERRORTYPE (error));
     exit (1);
   }
-  
-  wait (encoder, EVENT_PORT_DISABLE, 0);
 }
 
 void enable_camera_output_port (
@@ -558,8 +570,6 @@ void enable_camera_output_port (
     OMX_BUFFERHEADERTYPE** camera_output_buffer){
   //The port is not enabled until the buffer is allocated
   OMX_ERRORTYPE error;
-  
-  enable_port (camera, 70);
   
   OMX_PARAM_PORTDEFINITIONTYPE port_st;
   OMX_INIT_STRUCTURE (port_st);
@@ -570,44 +580,68 @@ void enable_camera_output_port (
         dump_OMX_ERRORTYPE (error));
     exit (1);
   }
-  printf ("allocating %s output buffer\n", camera->name);
-  if ((error = OMX_AllocateBuffer (camera->handle, camera_output_buffer, 70,
-      0, port_st.nBufferSize))){
+
+  printf ("allocating %s output buffer with size %i %i (%ix%i) %i %i %i %p %p\n", camera->name, port_st.nBufferSize, port_st.eDomain, port_st.format.video.nFrameWidth, port_st.format.video.nFrameHeight, port_st.format.video.nStride, port_st.format.video.nBitrate, port_st.format.video.eCompressionFormat, port_st.format.video.pNativeRender, port_st.format.video.pNativeWindow);
+#ifdef HS_INTERCEPT
+  void* ptr = malloc(port_st.nBufferSize);
+  /* if ((error = OMX_AllocateBuffer (camera->handle, camera_output_buffer, 70, */
+  /*     0, port_st.nBufferSize))){ */
+  if ((error = OMX_UseBuffer (camera->handle, camera_output_buffer, 70,
+			      0, port_st.nBufferSize, ptr))){
     fprintf (stderr, "error: OMX_AllocateBuffer: %s\n",
         dump_OMX_ERRORTYPE (error));
     exit (1);
   }
-  
-  wait (camera, EVENT_PORT_ENABLE, 0);
+#endif
 }
 
 void enable_render_input_port (
-    component_t* camera,
-    OMX_BUFFERHEADERTYPE** camera_output_buffer){
+    component_t* render,
+    OMX_BUFFERHEADERTYPE** render_input_buffer){
   //The port is not enabled until the buffer is allocated
   OMX_ERRORTYPE error;
-  
-  enable_port (camera, 90);
   
   OMX_PARAM_PORTDEFINITIONTYPE port_st;
   OMX_INIT_STRUCTURE (port_st);
   port_st.nPortIndex = 90;
-  if ((error = OMX_GetParameter (camera->handle, OMX_IndexParamPortDefinition,
+  if ((error = OMX_GetParameter (render->handle, OMX_IndexParamPortDefinition,
       &port_st))){
     fprintf (stderr, "error: OMX_GetParameter: %s\n",
         dump_OMX_ERRORTYPE (error));
     exit (1);
   }
-  /* printf ("allocating %s output buffer\n", camera->name); */
-  /* if ((error = OMX_AllocateBuffer (camera->handle, camera_output_buffer, 90, */
-  /*     0, port_st.nBufferSize))){ */
-  /*   fprintf (stderr, "error: OMX_AllocateBuffer: %s\n", */
-  /*       dump_OMX_ERRORTYPE (error)); */
-  /*   exit (1); */
-  /* } */
-  
-  wait (camera, EVENT_PORT_ENABLE, 0);
+
+  printf ("allocating %s input buffer with size %i %i (%ix%i)\n", render->name, port_st.nBufferSize, port_st.eDomain, port_st.format.video.nFrameWidth, port_st.format.video.nFrameHeight);
+
+  /* void* ptr = malloc(port_st.nBufferSize); */
+  /* if ((error = OMX_UseBuffer (render->handle, render_input_buffer, 90, */
+  /* 			      0, port_st.nBufferSize, ptr))){ */
+  printf ("bufferCountActual = %i\n", port_st.nBufferCountActual);
+  for (int i = 0; i < port_st.nBufferCountActual; i++) {
+      if ((error = OMX_AllocateBuffer (render->handle, render_input_buffer+i, 90,
+				       0, port_st.nBufferSize))){
+	fprintf (stderr, "error: OMX_UseBuffer: %s\n",
+		 dump_OMX_ERRORTYPE (error));
+	exit (1);
+      }
+  }
 }
+
+void disable_render_input_port (
+    component_t* render,
+    OMX_BUFFERHEADERTYPE** buffer){
+  //The port is not disabled until the buffer is released
+  OMX_ERRORTYPE error;
+  
+  //Free camera output buffer
+  printf ("releasing %s output buffer\n", render->name);
+  for (int i=0; i<3; ++i)
+    if ((error = OMX_FreeBuffer (render->handle, 90, buffer[i]))){
+      fprintf (stderr, "error: OMX_FreeBuffer: %s\n", dump_OMX_ERRORTYPE (error));
+      exit (1);
+    }
+}
+
 
 void disable_camera_output_port (
     component_t* camera,
@@ -615,16 +649,12 @@ void disable_camera_output_port (
   //The port is not disabled until the buffer is released
   OMX_ERRORTYPE error;
   
-  disable_port (camera, 70);
-  
   //Free camera output buffer
   printf ("releasing %s output buffer\n", camera->name);
   if ((error = OMX_FreeBuffer (camera->handle, 70, camera_output_buffer))){
     fprintf (stderr, "error: OMX_FreeBuffer: %s\n", dump_OMX_ERRORTYPE (error));
     exit (1);
   }
-  
-  wait (camera, EVENT_PORT_DISABLE, 0);
 }
 
 void set_camera_settings (component_t* camera){
@@ -955,16 +985,161 @@ void set_h264_settings (component_t* encoder){
   //https://github.com/gagle/raspberrypi-omxcam/blob/master/src/video.c
 }
 
+void set_render_config(component_t* render)
+{
+  OMX_ERRORTYPE error;
+  
+  /* OMX_CONFIG_BRCMUSEPROPRIETARYCALLBACKTYPE port_bool; */
+  /* OMX_INIT_STRUCTURE (port_bool); */
+  /* port_bool.nPortIndex = 90; */
+  /* if ((error = OMX_GetConfig (render->handle, OMX_IndexConfigBrcmUseProprietaryCallback, */
+  /*     &port_bool))){ */
+  /*   fprintf (stderr, "error: OMX_GetConfig: %s\n", dump_OMX_ERRORTYPE (error)); */
+  /*   exit (1); */
+  /* } */
+
+  /* printf("proprietary = %i\n", port_bool.bEnable); */
+  
+  OMX_CONFIG_DISPLAYREGIONTYPE port_dispreg;
+  //Configure render port definition
+  printf ("configuring %s display region\n", render->name);
+  OMX_INIT_STRUCTURE (port_dispreg);
+  port_dispreg.nPortIndex = 90;
+
+  printf("dispreg set = 0x%x num = %i fs = %i src = %i %i %i %i dst = %i %i %i %i mode = %x layer = %i ver = %x size = %i\n", port_dispreg.set, port_dispreg.num, port_dispreg.fullscreen, port_dispreg.src_rect.x_offset, port_dispreg.src_rect.y_offset, port_dispreg.src_rect.width, port_dispreg.src_rect.height, port_dispreg.dest_rect.x_offset, port_dispreg.dest_rect.y_offset, port_dispreg.dest_rect.width, port_dispreg.dest_rect.height, port_dispreg.mode, port_dispreg.layer, port_dispreg.nVersion.nVersion, port_dispreg.nSize);
+  
+  if ((error = OMX_GetConfig (render->handle, OMX_IndexConfigDisplayRegion,
+      &port_dispreg))){
+    fprintf (stderr, "error: OMX_GetParameter: %s\n",
+        dump_OMX_ERRORTYPE (error));
+    exit (1);
+  }
+
+  printf("dispreg set = 0x%x num = %i fs = %i src = %i %i %i %i dst = %i %i %i %i mode = %x layer = %i ver = %x size = %i\n", port_dispreg.set, port_dispreg.num, port_dispreg.fullscreen, port_dispreg.src_rect.x_offset, port_dispreg.src_rect.y_offset, port_dispreg.src_rect.width, port_dispreg.src_rect.height, port_dispreg.dest_rect.x_offset, port_dispreg.dest_rect.y_offset, port_dispreg.dest_rect.width, port_dispreg.dest_rect.height, port_dispreg.mode, port_dispreg.layer, port_dispreg.nVersion.nVersion, port_dispreg.nSize);
+  
+  port_dispreg.dest_rect.width = 1920;
+  port_dispreg.dest_rect.height = 1080;
+  port_dispreg.set = (OMX_DISPLAYSETTYPE)OMX_DISPLAY_SET_DEST_RECT;
+
+  //memset(&port_dispreg, 0, sizeof(OMX_CONFIG_DISPLAYREGIONTYPE));
+   port_dispreg.nSize = sizeof(OMX_CONFIG_DISPLAYREGIONTYPE);
+   port_dispreg.nVersion.nVersion = OMX_VERSION;
+   //  port_dispreg.nPortIndex = 90;
+   //   port_dispreg.fullscreen = OMX_FALSE;
+   //   port_dispreg.noaspect   = OMX_TRUE;
+   //   port_dispreg.set = (OMX_DISPLAYSETTYPE)(OMX_DISPLAY_SET_DEST_RECT|OMX_DISPLAY_SET_SRC_RECT|OMX_DISPLAY_SET_FULLSCREEN|OMX_DISPLAY_SET_NOASPECT);
+   //   port_dispreg.dest_rect.x_offset  = 50;
+   //   port_dispreg.dest_rect.y_offset  = 50;
+   //  port_dispreg.dest_rect.width     = 1280;
+   //   port_dispreg.dest_rect.height    = 720;
+   //   port_dispreg.src_rect.x_offset   = 0;
+   //   port_dispreg.src_rect.y_offset   = 0;
+   //   port_dispreg.src_rect.width      = 1280;
+   //   port_dispreg.src_rect.height     = 720;
+  
+  printf("dispreg set = 0x%x num = %i fs = %i src = %i %i %i %i dst = %i %i %i %i mode = %x layer = %i ver = %x size = %i\n", port_dispreg.set, port_dispreg.num, port_dispreg.fullscreen, port_dispreg.src_rect.x_offset, port_dispreg.src_rect.y_offset, port_dispreg.src_rect.width, port_dispreg.src_rect.height, port_dispreg.dest_rect.x_offset, port_dispreg.dest_rect.y_offset, port_dispreg.dest_rect.width, port_dispreg.dest_rect.height, port_dispreg.mode, port_dispreg.layer, port_dispreg.nVersion.nVersion, port_dispreg.nSize);
+  
+  if ((error = OMX_SetConfig(render->handle, OMX_IndexConfigDisplayRegion,
+      &port_dispreg))){
+    fprintf (stderr, "error: OMX_SetConfig: %s\n",
+        dump_OMX_ERRORTYPE (error));
+    exit (1);
+  }
+}
+
+void dbg_print_render(component_t* render)
+{ // print some stuff to get some insights
+  OMX_ERRORTYPE error;
+  OMX_PARAM_PORTDEFINITIONTYPE port_st;
+  OMX_INIT_STRUCTURE (port_st);
+  port_st.nPortIndex = 90;
+  if ((error = OMX_GetParameter (render->handle, OMX_IndexParamPortDefinition,
+				 &port_st))){
+    fprintf (stderr, "error: OMX_GetParameter: %s\n",
+	     dump_OMX_ERRORTYPE (error));
+    exit (1);
+  }
+
+  printf ("DBG %s %i %i port %i %i with size %i %i %i %i (%s (%ix%i) %i %i %i 0x%x %i 0x%x 0x%x %p %p) %i %i\n",
+	  render->name,
+	  port_st.nSize,
+	  port_st.eDir,
+	  port_st.nBufferCountActual,
+	  port_st.nBufferCountMin,
+	  port_st.nBufferSize,
+	  port_st.bEnabled,
+	  port_st.bPopulated,
+	  port_st.eDomain,
+	  port_st.format.video.cMIMEType,
+	  port_st.format.video.nFrameWidth,
+	  port_st.format.video.nFrameHeight,
+	  port_st.format.video.nStride,
+	  port_st.format.video.nSliceHeight,
+	  port_st.format.video.nBitrate,
+	  port_st.format.video.xFramerate,	  
+	  port_st.format.video.bFlagErrorConcealment,	  
+	  port_st.format.video.eCompressionFormat,
+	  port_st.format.video.eColorFormat,
+	  port_st.format.video.pNativeRender,
+	  port_st.format.video.pNativeWindow,
+	  port_st.bBuffersContiguous,
+	  port_st.nBufferAlignment);
+
+  OMX_CONFIG_DISPLAYREGIONTYPE port_dispreg;
+  //Configure render port definition
+  printf ("configuring %s display region\n", render->name);
+  OMX_INIT_STRUCTURE (port_dispreg);
+  port_dispreg.nPortIndex = 90;
+
+  if ((error = OMX_GetConfig (render->handle, OMX_IndexConfigDisplayRegion,
+      &port_dispreg))){
+    fprintf (stderr, "error: OMX_GetParameter: %s\n",
+        dump_OMX_ERRORTYPE (error));
+    exit (1);
+  }
+
+  printf("dispreg size = %i ver = %x set = 0x%x num = %i fs = %i %i dst = %i %i %i %i src = %i %i %i %i %i mode = %x %i %i layer = %i %i %i %i %i\n",
+	 port_dispreg.nSize,
+	 port_dispreg.nVersion.nVersion,
+	 port_dispreg.set,
+	 port_dispreg.num,
+	 port_dispreg.fullscreen,
+      	 port_dispreg.transform,
+	 port_dispreg.dest_rect.x_offset,
+	 port_dispreg.dest_rect.y_offset,
+	 port_dispreg.dest_rect.width,
+	 port_dispreg.dest_rect.height,
+	 port_dispreg.src_rect.x_offset,
+	 port_dispreg.src_rect.y_offset,
+	 port_dispreg.src_rect.width,
+	 port_dispreg.src_rect.height,
+	 port_dispreg.noaspect,
+	 port_dispreg.mode,
+	 port_dispreg.pixel_x,
+	 port_dispreg.pixel_y,
+	 port_dispreg.layer,
+	 port_dispreg.copyprotect_required,
+	 port_dispreg.alpha,
+	 port_dispreg.wfc_context_width,
+	 port_dispreg.wfc_context_height);
+}
+
 int main (){
   OMX_ERRORTYPE error;
   OMX_BUFFERHEADERTYPE* encoder_output_buffer;
+#ifdef HS_INTERCEPT
+  OMX_BUFFERHEADERTYPE* camera_output_buffer;
+  OMX_BUFFERHEADERTYPE* render_input_buffer[3];
+#endif
   component_t camera;
   component_t encoder;
   component_t render;
   camera.name = "OMX.broadcom.camera";
   encoder.name = "OMX.broadcom.video_encode";
   render.name = "OMX.broadcom.video_render";
-  
+
+  printf ("start\n");
+
   //Open the file
   int fd = open (FILENAME, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0666);
   if (fd == -1){
@@ -980,6 +1155,8 @@ int main (){
     fprintf (stderr, "error: OMX_Init: %s\n", dump_OMX_ERRORTYPE (error));
     exit (1);
   }
+
+
   
   //Initialize components
   init_component (&camera);
@@ -1068,7 +1245,7 @@ int main (){
         dump_OMX_ERRORTYPE (error));
     exit (1);
   }
-  
+
   //Configure render port definition
   printf ("configuring %s port definition\n", render.name);
   OMX_INIT_STRUCTURE (port_st);
@@ -1081,20 +1258,33 @@ int main (){
         dump_OMX_ERRORTYPE (error));
     exit (1);
   }
-  //port_st.format.video.nFrameWidth = CAM_WIDTH;
-  //port_st.format.video.nFrameHeight = CAM_HEIGHT;
-  //port_st.format.video.nStride = CAM_WIDTH;
+
+  printf ("config %s input buffer with size %i %i (%ix%i)\n", render.name, port_st.nBufferSize, port_st.eDomain, port_st.format.video.nFrameWidth, port_st.format.video.nFrameHeight);
+
+#ifdef HS_INTERCEPT
+  // disabled this block seems it is not required, instead the header
+  // which needs to be sent before the data probably holds this
+  // information, see
+  // file:///usr/share/doc/libraspberrypi-doc/ilcomponents/video_encode.html.
+  port_st.format.video.nFrameWidth = 1920;
+  port_st.format.video.nFrameHeight = 1080;
+  port_st.format.video.nSliceHeight = 1088;
+  port_st.format.video.nStride = 1920;
+  port_st.format.video.xFramerate = VIDEO_FRAMERATE << 16;
+  port_st.format.video.pNativeRender = 0;
   //port_st.format.video.xFramerate = VIDEO_FRAMERATE << 16;
-  //Despite being configured later, these two fields need to be set
-  //  port_st.format.video.nBitrate = VIDEO_QP ? 0 : VIDEO_BITRATE;
-  //port_st.format.video.eCompressionFormat = OMX_VIDEO_CodingAVC;
+  /* //Despite being configured later, these two fields need to be set */
+  port_st.format.video.eColorFormat = OMX_COLOR_FormatYUV420PackedPlanar;
+  //  port_st.format.video.eColorFormat = OMX_COLOR_Format32bitARGB8888;
+  port_st.nBufferSize = -1;
   if ((error = OMX_SetParameter (render.handle, OMX_IndexParamPortDefinition,
       &port_st))){
     fprintf (stderr, "error: OMX_SetParameter: %s\n",
         dump_OMX_ERRORTYPE (error));
     exit (1);
   }
-  
+#endif
+
   //Configure H264
   set_h264_settings (&encoder);
   
@@ -1105,11 +1295,13 @@ int main (){
         dump_OMX_ERRORTYPE (error));
     exit (1);
   }
+#ifndef HS_INTERCEPT
   if ((error = OMX_SetupTunnel (camera.handle, 70, render.handle, 90))){
     fprintf (stderr, "error: OMX_SetupTunnel: %s\n",
         dump_OMX_ERRORTYPE (error));
     exit (1);
   }
+#endif
   
   //Change state to IDLE
   change_state (&camera, OMX_StateIdle);
@@ -1118,6 +1310,10 @@ int main (){
   wait (&encoder, EVENT_STATE_SET, 0);
   change_state (&render, OMX_StateIdle);
   wait (&render, EVENT_STATE_SET, 0);
+   
+#ifdef HS_INTERCEPT
+  set_render_config(&render);
+#endif
   
   //Enable the ports
 #ifdef HS_RECORD
@@ -1125,13 +1321,25 @@ int main (){
   wait (&camera, EVENT_PORT_ENABLE, 0);
 #endif
   enable_port (&camera, 70);
+#ifdef HS_INTERCEPT
+  enable_camera_output_port (&camera, &camera_output_buffer);
+#endif
   wait (&camera, EVENT_PORT_ENABLE, 0);
   enable_port (&render, 90);
+#ifdef HS_INTERCEPT
+  enable_render_input_port (&render, render_input_buffer);
+#endif
+  printf ("called UseBuffer\n");
   wait (&render, EVENT_PORT_ENABLE, 0);
+  printf ("wait ended\n");
   enable_port (&encoder, 200);
   wait (&encoder, EVENT_PORT_ENABLE, 0);
+  enable_port (&encoder, 201);
   enable_encoder_output_port (&encoder, &encoder_output_buffer);
-  
+  wait (&encoder, EVENT_PORT_ENABLE, 0);
+
+  dbg_print_render(&render);
+
   //Change state to EXECUTING
   change_state (&camera, OMX_StateExecuting);
   wait (&camera, EVENT_STATE_SET, 0);
@@ -1141,6 +1349,8 @@ int main (){
   change_state (&render, OMX_StateExecuting);
   wait (&render, EVENT_STATE_SET, 0);
   
+  dbg_print_render(&render);
+
   //Enable camera capture port. This basically says that the port 71 will be
   //used to get data from the camera. If you're capturing a still, the port 72
   //must be used
@@ -1161,6 +1371,91 @@ int main (){
   long now = spec.tv_sec*1000 + spec.tv_nsec/1.0e6;
   long end = now + 3000;
 
+  int renderbuf=-1;
+#ifdef HS_INTERCEPT
+  bool firstUse = 1;
+  while (1){
+    /* if ((error = OMX_FillThisBuffer (encoder.handle, encoder_output_buffer))){ */
+    /*   fprintf (stderr, "error: OMX_FillThisBuffer: %s\n", */
+    /*       dump_OMX_ERRORTYPE (error)); */
+    /*   exit (1); */
+    /* } */
+
+    int offset = 0;
+    //    offset<1920*1088*3/2
+    renderbuf = (renderbuf + 1) % 3;
+
+    VCOS_UNSIGNED retrieved_events;
+    if (!firstUse)
+    {
+      // I should first make sure the buffer is empty, unfortunately this blocks
+      wait (&render, EVENT_EMPTY_BUFFER_DONE, &retrieved_events);
+      fprintf(stderr, "here we are the buffer is empty = %i\n", retrieved_events);
+    }
+    if (2==renderbuf) firstUse=false;
+     
+    while (!(OMX_BUFFERFLAG_ENDOFFRAME & (camera_output_buffer->nFlags)))
+      {
+	//Get the buffer data
+	if ((error = OMX_FillThisBuffer (camera.handle, camera_output_buffer))){
+	  fprintf (stderr, "error: OMX_FillThisBuffer: %s\n",
+		   dump_OMX_ERRORTYPE (error));
+	  exit (1);
+	}
+    
+	//Wait until it's filled
+	wait (&camera, EVENT_FILL_BUFFER_DONE, 0);
+
+	fprintf(stderr, "here we are we got the image %i %i 0x%x %x %x %x %x\n",
+		camera_output_buffer->nFilledLen,
+		camera_output_buffer->nOffset,
+		camera_output_buffer->nFlags,
+		*(unsigned int*)(camera_output_buffer->pBuffer),
+		*(unsigned int*)(camera_output_buffer->pBuffer+4),
+		*(unsigned int*)(camera_output_buffer->pBuffer+8),
+		*(unsigned int*)(camera_output_buffer->pBuffer+12));
+
+	
+	memcpy(render_input_buffer[renderbuf]->pBuffer+offset, camera_output_buffer->pBuffer,
+	       camera_output_buffer->nFilledLen*2/3);
+	memcpy(render_input_buffer[renderbuf]->pBuffer+1920*1088+offset/4,
+	       camera_output_buffer->pBuffer + camera_output_buffer->nFilledLen*2/3,
+	       camera_output_buffer->nFilledLen/6);
+	memcpy(render_input_buffer[renderbuf]->pBuffer+1920*1088*5/4+offset/4,
+	       camera_output_buffer->pBuffer + camera_output_buffer->nFilledLen*5/6,
+	       camera_output_buffer->nFilledLen/6);
+	offset += camera_output_buffer->nFilledLen*2/3;
+      }
+    camera_output_buffer->nFlags = 0;
+    render_input_buffer[renderbuf]->nFilledLen = offset*3/2;
+    render_input_buffer[renderbuf]->nFlags = OMX_BUFFERFLAG_ENDOFFRAME | OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_EOS;
+    render_input_buffer[renderbuf]->nOffset = 0;
+    fprintf(stderr, "end of frame got %i / %i\n",
+	    render_input_buffer[renderbuf]->nFilledLen, render_input_buffer[renderbuf]->nAllocLen);
+
+    /* if (pwrite (fd, render_input_buffer[renderbuf]->pBuffer, */
+    /*     render_input_buffer[renderbuf]->nFilledLen, */
+    /*     render_input_buffer[renderbuf]->nOffset) == -1){ */
+    /*   fprintf (stderr, "error: pwrite\n"); */
+    /*   exit (1); */
+    /* } */
+    /* break; */
+    
+    if ((error = OMX_EmptyThisBuffer(render.handle, render_input_buffer[renderbuf]))){
+      fprintf (stderr, "error: OMX_EmptyThisBuffer: %s\n",
+          dump_OMX_ERRORTYPE (error));
+      exit (1);
+    }
+
+    fprintf(stderr, "here does it now continue?\n");
+    //Wait until it's filled
+    //    wait (&encoder, EVENT_FILL_BUFFER_DONE, 0);
+   
+
+    clock_gettime (CLOCK_MONOTONIC, &spec);
+    if (spec.tv_sec*1000 + spec.tv_nsec/1.0e6 >= end) break;
+  }
+#else
   while (1){
     //Get the buffer data
     if ((error = OMX_FillThisBuffer (encoder.handle, encoder_output_buffer))){
@@ -1183,7 +1478,10 @@ int main (){
     clock_gettime (CLOCK_MONOTONIC, &spec);
     if (spec.tv_sec*1000 + spec.tv_nsec/1.0e6 >= end) break;
   }
+#endif
   
+  dbg_print_render(&render);
+
   printf ("------------------------------------------------\n");
   
   //Disable camera capture port
@@ -1209,12 +1507,20 @@ int main (){
   wait (&camera, EVENT_PORT_DISABLE, 0);
 #endif
   disable_port (&camera, 70);
+#ifdef HS_INTERCEPT
+  disable_camera_output_port (&camera, camera_output_buffer);
+#endif
   wait (&camera, EVENT_PORT_DISABLE, 0);
   disable_port (&render, 90);
+#ifdef HS_INTERCEPT
+  disable_render_input_port (&render, render_input_buffer);
+#endif
   wait (&render, EVENT_PORT_DISABLE, 0);
   disable_port (&encoder, 200);
   wait (&encoder, EVENT_PORT_DISABLE, 0);
+  disable_port (&encoder, 201);
   disable_encoder_output_port (&encoder, encoder_output_buffer);
+  wait (&encoder, EVENT_PORT_DISABLE, 0);
   
   //Change state to LOADED
   change_state (&camera, OMX_StateLoaded);
