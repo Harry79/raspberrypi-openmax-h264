@@ -100,6 +100,13 @@ white balance) algorithms.
 #define HS_RECORD
 #define HS_INTERCEPT
 
+static volatile int sKeepRunning = 1;
+
+void intHandler(int dummy)
+{
+  sKeepRunning = 0;
+}
+
 /*
 Possible values:
 
@@ -1138,6 +1145,8 @@ int main (){
   encoder.name = "OMX.broadcom.video_encode";
   render.name = "OMX.broadcom.video_render";
 
+  signal(SIGINT, intHandler);
+  
   printf ("start\n");
 
   //Open the file
@@ -1369,18 +1378,12 @@ int main (){
   struct timespec spec;
   clock_gettime (CLOCK_MONOTONIC, &spec);
   long now = spec.tv_sec*1000 + spec.tv_nsec/1.0e6;
-  long end = now + 3000;
+  long end = now + 30000;
 
-  int renderbuf=-1;
 #ifdef HS_INTERCEPT
+  int renderbuf=-1;
   bool firstUse = 1;
-  while (1){
-    /* if ((error = OMX_FillThisBuffer (encoder.handle, encoder_output_buffer))){ */
-    /*   fprintf (stderr, "error: OMX_FillThisBuffer: %s\n", */
-    /*       dump_OMX_ERRORTYPE (error)); */
-    /*   exit (1); */
-    /* } */
-
+  while (sKeepRunning){
     int offset = 0;
     //    offset<1920*1088*3/2
     renderbuf = (renderbuf + 1) % 3;
@@ -1393,9 +1396,11 @@ int main (){
       fprintf(stderr, "here we are the buffer is empty = %i\n", retrieved_events);
     }
     if (2==renderbuf) firstUse=false;
-     
+
+    printf ("camera_output_buffer->nFlags = %i\n", camera_output_buffer->nFlags);
     while (!(OMX_BUFFERFLAG_ENDOFFRAME & (camera_output_buffer->nFlags)))
       {
+	printf ("camera_output_buffer->nFlags = %i\n", camera_output_buffer->nFlags);
 	//Get the buffer data
 	if ((error = OMX_FillThisBuffer (camera.handle, camera_output_buffer))){
 	  fprintf (stderr, "error: OMX_FillThisBuffer: %s\n",
@@ -1403,10 +1408,12 @@ int main (){
 	  exit (1);
 	}
     
+        //usleep(100);
+	printf ("now let's wait until the buffer is filled\n");
 	//Wait until it's filled
 	wait (&camera, EVENT_FILL_BUFFER_DONE, 0);
 
-	fprintf(stderr, "here we are we got the image %i %i 0x%x %x %x %x %x\n",
+	printf ("here we are we got the image %i %i 0x%x %x %x %x %x\n",
 		camera_output_buffer->nFilledLen,
 		camera_output_buffer->nOffset,
 		camera_output_buffer->nFlags,
@@ -1430,33 +1437,56 @@ int main (){
     render_input_buffer[renderbuf]->nFilledLen = offset*3/2;
     render_input_buffer[renderbuf]->nFlags = OMX_BUFFERFLAG_ENDOFFRAME | OMX_BUFFERFLAG_SYNCFRAME | OMX_BUFFERFLAG_EOS;
     render_input_buffer[renderbuf]->nOffset = 0;
-    fprintf(stderr, "end of frame got %i / %i\n",
-	    render_input_buffer[renderbuf]->nFilledLen, render_input_buffer[renderbuf]->nAllocLen);
+    printf ("end of frame got %i / %i\n",
+	    render_input_buffer[renderbuf]->nFilledLen,
+	    render_input_buffer[renderbuf]->nAllocLen);
 
-    /* if (pwrite (fd, render_input_buffer[renderbuf]->pBuffer, */
-    /*     render_input_buffer[renderbuf]->nFilledLen, */
-    /*     render_input_buffer[renderbuf]->nOffset) == -1){ */
-    /*   fprintf (stderr, "error: pwrite\n"); */
-    /*   exit (1); */
-    /* } */
-    /* break; */
-    
     if ((error = OMX_EmptyThisBuffer(render.handle, render_input_buffer[renderbuf]))){
       fprintf (stderr, "error: OMX_EmptyThisBuffer: %s\n",
           dump_OMX_ERRORTYPE (error));
       exit (1);
     }
 
-    fprintf(stderr, "here does it now continue?\n");
-    //Wait until it's filled
-    //    wait (&encoder, EVENT_FILL_BUFFER_DONE, 0);
-   
+#ifdef HS_RECORD
+    encoder_output_buffer->nFlags = 0;
+    while (!(OMX_BUFFERFLAG_ENDOFFRAME & (encoder_output_buffer->nFlags))) {
+      //Get the buffer data
+      if ((error = OMX_FillThisBuffer
+	   (encoder.handle, encoder_output_buffer))){
+	fprintf (stderr, "error: OMX_FillThisBuffer: %s\n",
+		 dump_OMX_ERRORTYPE (error));
+	exit (1);
+      }
 
+      printf ("here does it now continue?\n");
+      //Wait until it's filled
+      wait (&encoder, EVENT_FILL_BUFFER_DONE, 0);
+   
+      printf ("here we are we got the encoded %i %i 0x%x %x %x %x %x\n",
+	      encoder_output_buffer->nFilledLen,
+	      encoder_output_buffer->nOffset,
+	      encoder_output_buffer->nFlags,
+	      *(unsigned int*)(encoder_output_buffer->pBuffer),
+	      *(unsigned int*)(encoder_output_buffer->pBuffer+4),
+	      *(unsigned int*)(encoder_output_buffer->pBuffer+8),
+	      *(unsigned int*)(encoder_output_buffer->pBuffer+12));
+
+      //Append the buffer into the file
+      if (pwrite (fd, encoder_output_buffer->pBuffer,
+		encoder_output_buffer->nFilledLen,
+		  encoder_output_buffer->nOffset) == -1){
+	fprintf (stderr, "error: pwrite\n");
+	exit (1);
+      }
+    }
+#endif
+    
     clock_gettime (CLOCK_MONOTONIC, &spec);
-    if (spec.tv_sec*1000 + spec.tv_nsec/1.0e6 >= end) break;
+    printf ("running for %g\n", spec.tv_sec + spec.tv_nsec/1.0e9- end/1000.);
+    //    if (spec.tv_sec*1000 + spec.tv_nsec/1.0e6 >= end) break;
   }
 #else
-  while (1){
+  while (sKeepRunning){
     //Get the buffer data
     if ((error = OMX_FillThisBuffer (encoder.handle, encoder_output_buffer))){
       fprintf (stderr, "error: OMX_FillThisBuffer: %s\n",
@@ -1476,7 +1506,7 @@ int main (){
     }
     
     clock_gettime (CLOCK_MONOTONIC, &spec);
-    if (spec.tv_sec*1000 + spec.tv_nsec/1.0e6 >= end) break;
+    //    if (spec.tv_sec*1000 + spec.tv_nsec/1.0e6 >= end) break;
   }
 #endif
   
